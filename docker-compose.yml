@@ -1,0 +1,42 @@
+# Local stack: mock backends + SQL Server 2022 standing in for Azure SQL.
+# The Mule app itself runs in Anypoint Studio (or a local Mule runtime) with env=local.
+services:
+  mocks:
+    build: ./mock-services
+    container_name: omnihub-mocks
+    ports:
+      - "8090:8090"
+    environment:
+      SHOPIFY_ORDERS_PER_POLL: "4"
+      AMAZON_ORDERS_PER_POLL: "4"
+      SAP_TRANSIENT_FAILURE_RATE: "0.02"
+      BAD_SKU_RATE: "0.01"
+
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: omnihub-sql
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "Local_Dev_Passw0rd!"
+      MSSQL_PID: "Developer"
+    ports:
+      - "1433:1433"
+    volumes:
+      - sqldata:/var/opt/mssql
+
+  sql-init:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: omnihub-sql-init
+    depends_on:
+      - sqlserver
+    environment:
+      SQL_HOST: sqlserver
+      SQL_PASSWORD: "Local_Dev_Passw0rd!"
+    volumes:
+      - ./sql/azure-sql:/sql:ro
+      - ./scripts/init-db.sh:/init-db.sh:ro
+    entrypoint: ["/bin/bash", "/init-db.sh"]
+    restart: "no"
+
+volumes:
+  sqldata:

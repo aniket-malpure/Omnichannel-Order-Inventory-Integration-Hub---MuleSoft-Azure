@@ -1,0 +1,68 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://omnichannel-hub.local/schemas/canonical-order.schema.json",
+  "title": "CanonicalOrder",
+  "description": "Channel-agnostic sales order shared by every process flow.",
+  "type": "object",
+  "required": ["orderId", "channel", "channelOrderId", "orderDate", "currency", "customer", "lines", "totals"],
+  "properties": {
+    "orderId": { "type": "string", "pattern": "^(SHP|AMZ)-.+" },
+    "channel": { "type": "string", "enum": ["SHOPIFY", "AMAZON"] },
+    "channelOrderId": { "type": "string", "minLength": 1 },
+    "channelOrderNumber": { "type": ["string", "null"] },
+    "orderDate": { "type": "string", "format": "date" },
+    "currency": { "type": "string", "pattern": "^[A-Z]{3}$" },
+    "status": { "type": ["string", "null"] },
+    "customer": {
+      "type": "object",
+      "properties": {
+        "externalId": { "type": ["string", "null"] },
+        "email": { "type": ["string", "null"] },
+        "firstName": { "type": ["string", "null"] },
+        "lastName": { "type": ["string", "null"] },
+        "phone": { "type": ["string", "null"] }
+      }
+    },
+    "shipTo": {
+      "type": "object",
+      "properties": {
+        "name": { "type": ["string", "null"] },
+        "street1": { "type": ["string", "null"] },
+        "street2": { "type": ["string", "null"] },
+        "city": { "type": ["string", "null"] },
+        "state": { "type": ["string", "null"] },
+        "postalCode": { "type": ["string", "null"] },
+        "country": { "type": ["string", "null"] }
+      }
+    },
+    "lines": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["lineNumber", "sku", "quantity", "unitPrice"],
+        "properties": {
+          "lineNumber": { "type": "integer", "minimum": 1 },
+          "sku": { "type": "string", "minLength": 1 },
+          "description": { "type": ["string", "null"] },
+          "quantity": { "type": "number", "exclusiveMinimum": 0 },
+          "unitPrice": { "type": "number", "minimum": 0 },
+          "discountAmount": { "type": "number", "minimum": 0 },
+          "taxAmount": { "type": "number", "minimum": 0 }
+        }
+      }
+    },
+    "totals": {
+      "type": "object",
+      "required": ["grandTotal"],
+      "properties": {
+        "subtotal": { "type": "number" },
+        "tax": { "type": "number" },
+        "shipping": { "type": "number" },
+        "discount": { "type": "number" },
+        "grandTotal": { "type": "number", "minimum": 0 }
+      }
+    },
+    "sourceUpdatedAt": { "type": ["string", "null"] }
+  }
+}

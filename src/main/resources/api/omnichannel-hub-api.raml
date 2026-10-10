@@ -1,0 +1,129 @@
+#%RAML 1.0
+title: Omnichannel Order & Inventory Integration Hub
+version: v1
+baseUri: https://{host}/api/v1
+baseUriParameters:
+  host:
+    type: string
+    default: localhost:8081
+mediaType: application/json
+description: |
+  Experience API for the hub. Shopify pushes orders through a signed webhook;
+  operators trigger syncs and read sync health. Polling schedulers run the same
+  process flows automatically.
+
+traits:
+  apiKeyProtected:
+    headers:
+      x-api-key:
+        type: string
+        description: Hub API key (CloudHub protected property `api.key`)
+    responses:
+      401:
+        body:
+          type: ErrorResponse
+
+types:
+  ErrorResponse:
+    type: object
+    properties:
+      error: string
+      message: string
+      correlationId: string
+  SyncSummary:
+    type: object
+    additionalProperties: true
+  SyncMetrics:
+    type: object
+    properties:
+      windowDays: integer
+      overall:
+        type: object
+        properties:
+          entities: integer
+          succeeded: integer
+          successRatePct: number | nil
+      daily:
+        type: array
+        items:
+          type: object
+          properties:
+            date: string
+            channel: string
+            entityType: string
+            entities: integer
+            attempts: integer
+            succeeded: integer
+            successRatePct: number
+
+/health:
+  get:
+    description: Liveness check
+    responses:
+      200:
+        body:
+          type: object
+
+/webhooks/shopify/orders:
+  post:
+    description: Shopify orders/create webhook. Verified with HMAC-SHA256.
+    headers:
+      X-Shopify-Hmac-Sha256:
+        type: string
+      X-Shopify-Topic:
+        type: string
+        required: false
+    body:
+      type: object
+    responses:
+      202:
+        body:
+          type: object
+          properties:
+            accepted: boolean
+            orderId: string
+            correlationId: string
+      401:
+        body:
+          type: ErrorResponse
+
+/sync/{entity}:
+  uriParameters:
+    entity:
+      enum: [orders, accounts, inventory, replay]
+  post:
+    is: [apiKeyProtected]
+    description: Run a sync immediately instead of waiting for the scheduler.
+    responses:
+      200:
+        body:
+          type: SyncSummary
+      400:
+        body:
+          type: ErrorResponse
+
+/metrics/sync:
+  get:
+    is: [apiKeyProtected]
+    queryParameters:
+      days:
+        type: integer
+        default: 7
+        minimum: 1
+        maximum: 90
+    responses:
+      200:
+        body:
+          type: SyncMetrics
+
+/errors:
+  get:
+    is: [apiKeyProtected]
+    queryParameters:
+      status:
+        enum: [PENDING_RETRY, RETRYING, RESOLVED, DEAD_LETTER, NON_RETRYABLE]
+        default: PENDING_RETRY
+    responses:
+      200:
+        body:
+          type: array

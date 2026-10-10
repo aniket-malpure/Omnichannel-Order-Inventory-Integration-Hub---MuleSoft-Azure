@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+      xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd">
+
+    <!-- =====================================================================
+         PROCESS LAYER: Inventory sync (WMS CSV -> canonical inventory -> Shopify + Amazon)
+         Full refresh each run, so failed SKUs self-heal on the next cycle.
+         ===================================================================== -->
+
+    <flow name="prc-inventory-sync-scheduler-flow">
+        <scheduler doc:name="Inventory sync schedule">
+            <scheduling-strategy>
+                <fixed-frequency frequency="${schedule.inventorySyncMinutes}" timeUnit="MINUTES"/>
+            </scheduling-strategy>
+        </scheduler>
+        <flow-ref doc:name="Sync inventory" name="prc-inventory-sync-flow"/>
+    </flow>
+
+    <flow name="prc-inventory-sync-flow">
+        <set-variable variableName="entityType" value="INVENTORY" doc:name="entityType"/>
+        <set-variable variableName="runStartMillis" value="#[now() as Number { unit: 'milliseconds' }]" doc:name="runStartMillis"/>
+        <set-variable variableName="shopifyOk" value="#[0]" doc:name="shopifyOk"/>
+        <set-variable variableName="amazonOk" value="#[0]" doc:name="amazonOk"/>
+        <set-variable variableName="failed" value="#[0]" doc:name="failed"/>
+
+        <flow-ref doc:name="Fetch WMS inventory" name="sys-wms-get-inventory-flow"/>
+        <ee:transform doc:name="WMS CSV to Canonical Inventory">
+            <ee:message>
+                <ee:set-payload resource="dwl/wms-inventory-to-canonical.dwl"/>
+            </ee:message>
+        </ee:transform>
+        <set-variable variableName="inventory" value="#[payload]" doc:name="inventory"/>
+
+        <!-- Shopify needs inventory_item_id, so build a sku -> inventory_item_id map first -->
+        <flow-ref doc:name="Fetch Shopify products" name="sys-shopify-get-products-flow" target="shopifyProducts"/>
+        <ee:transform doc:name="Canonical to Shopify inventory updates">
+            <ee:message>
+                <ee:set-payload resource="dwl/canonical-to-shopify-inventory.dwl"/>
+            </ee:message>
+        </ee:transform>
+
+        <foreach doc:name="Update Shopify levels" collection="#[payload]">
+            <try doc:name="Try SKU">
+                <set-variable variableName="channel" value="SHOPIFY" doc:name="channel"/>
+                <set-variable variableName="entityKey" value="#['SHOPIFY:' ++ payload.sku]" doc:name="entityKey"/>
+                <set-variable variableName="sourceRecord" value="#[payload]" doc:name="sourceRecord"/>
+                <set-payload value="#[output application/json --- payload.request]" doc:name="Shopify request body"/>
+                <flow-ref doc:name="Set Shopify level" name="sys-shopify-set-inventory-flow"/>
+                <set-variable variableName="shopifyOk" value="#[vars.shopifyOk + 1]" doc:name="shopifyOk++"/>
+                <error-handler>
+                    <on-error-continue type="ANY" doc:name="Log SKU failure">
+                        <set-variable variableName="failed" value="#[vars.failed + 1]" doc:name="failed++"/>
+                        <flow-ref doc:name="Log sync error" name="common-log-sync-error-flow"/>
+                    </on-error-continue>
+                </error-handler>
+            </try>
+        </foreach>
+
+        <foreach doc:name="Update Amazon listings" collection="#[vars.inventory]">
+            <try doc:name="Try SKU">
+                <set-variable variableName="channel" value="AMAZON" doc:name="channel"/>
+                <set-variable variableName="sku" value="#[payload.sku]" doc:name="sku"/>
+                <set-variable variableName="entityKey" value="#['AMAZON:' ++ payload.sku]" doc:name="entityKey"/>
+                <set-variable variableName="sourceRecord" value="#[payload]" doc:name="sourceRecord"/>
+                <ee:transform doc:name="Canonical to Listings patch">
+                    <ee:message>
+                        <ee:set-payload resource="dwl/canonical-to-amazon-listing-patch.dwl"/>
+                    </ee:message>
+                </ee:transform>
+                <flow-ref doc:name="Patch Amazon listing" name="sys-amazon-patch-listing-flow"/>
+                <set-variable variableName="amazonOk" value="#[vars.amazonOk + 1]" doc:name="amazonOk++"/>
+                <error-handler>
+                    <on-error-continue type="ANY" doc:name="Log SKU failure">
+                        <set-variable variableName="failed" value="#[vars.failed + 1]" doc:name="failed++"/>
+                        <flow-ref doc:name="Log sync error" name="common-log-sync-error-flow"/>
+                    </on-error-continue>
+                </error-handler>
+            </try>
+        </foreach>
+
+        <!-- One summary audit row per run -->
+        <set-variable variableName="channel" value="WMS" doc:name="channel"/>
+        <set-variable variableName="entityKey" value="#['RUN-' ++ correlationId]" doc:name="entityKey"/>
+        <set-variable variableName="outcome" value="#[if (vars.failed == 0) 'SYNCED' else 'PARTIAL']" doc:name="outcome"/>
+        <set-variable variableName="targetRef" doc:name="targetRef"
+                      value="#['skus=' ++ (sizeOf(vars.inventory) as String) ++ ';shopify=' ++ (vars.shopifyOk as String) ++ ';amazon=' ++ (vars.amazonOk as String) ++ ';failed=' ++ (vars.failed as String)]"/>
+        <set-variable variableName="startMillis" value="#[vars.runStartMillis]" doc:name="startMillis"/>
+        <flow-ref doc:name="Audit run" name="common-log-sync-audit-flow"/>
+
+        <set-payload doc:name="Summary"
+                     value="#[output application/json --- { skus: sizeOf(vars.inventory), shopifyUpdated: vars.shopifyOk, amazonUpdated: vars.amazonOk, failed: vars.failed }]"/>
+        <logger level="INFO" doc:name="Log summary" message="#['[' ++ correlationId ++ '] Inventory sync: ' ++ vars.targetRef]"/>
+    </flow>
+</mule>

@@ -1,0 +1,175 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns:db="http://www.mulesoft.org/schema/mule/db"
+      xmlns:vm="http://www.mulesoft.org/schema/mule/vm"
+      xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+        http://www.mulesoft.org/schema/mule/db http://www.mulesoft.org/schema/mule/db/current/mule-db.xsd
+        http://www.mulesoft.org/schema/mule/vm http://www.mulesoft.org/schema/mule/vm/current/mule-vm.xsd
+        http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd">
+
+    <!-- =====================================================================
+         EXPERIENCE LAYER: /api/v1 (contract: api/omnichannel-hub-api.raml)
+         ===================================================================== -->
+
+    <sub-flow name="exp-require-api-key">
+        <choice doc:name="Valid x-api-key?">
+            <when expression="#[attributes.headers.'x-api-key' != p('api.key')]">
+                <raise-error doc:name="Unauthorized" type="APP:UNAUTHORIZED" description="Missing or invalid x-api-key header"/>
+            </when>
+        </choice>
+    </sub-flow>
+
+    <flow name="exp-health-flow">
+        <http:listener doc:name="GET /api/v1/health" config-ref="HTTP_Listener_config"
+                       path="/api/v1/health" allowedMethods="GET"/>
+        <set-payload doc:name="Health"
+                     value='#[output application/json --- { status: "UP", app: app.name, env: p("env"), timestamp: now() }]'/>
+    </flow>
+
+    <!-- Shopify orders/create webhook, verified with X-Shopify-Hmac-Sha256 -->
+    <flow name="exp-shopify-order-webhook-flow">
+        <http:listener doc:name="POST /api/v1/webhooks/shopify/orders" config-ref="HTTP_Listener_config"
+                       path="/api/v1/webhooks/shopify/orders" allowedMethods="POST"
+                       outputMimeType="application/octet-stream">
+            <http:response statusCode="#[vars.httpStatus default 202]"/>
+            <http:error-response statusCode="#[vars.httpStatus default 500]">
+                <http:body><![CDATA[#[payload]]]></http:body>
+            </http:error-response>
+        </http:listener>
+        <ee:transform doc:name="Compute HMAC">
+            <ee:variables>
+                <ee:set-variable variableName="expectedHmac"><![CDATA[%dw 2.0
+import dw::Crypto
+import toBase64 from dw::core::Binaries
+output application/java
+---
+toBase64(Crypto::HMACBinary(p('shopify.webhookSecret') as Binary, payload as Binary, "HmacSHA256"))]]></ee:set-variable>
+            </ee:variables>
+        </ee:transform>
+        <choice doc:name="Signature valid?">
+            <when expression="#[attributes.headers.'x-shopify-hmac-sha256' != vars.expectedHmac]">
+                <raise-error doc:name="Invalid signature" type="APP:INVALID_SIGNATURE" description="Shopify webhook HMAC verification failed"/>
+            </when>
+        </choice>
+        <ee:transform doc:name="Wrap webhook order">
+            <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{ orders: [ read(payload, "application/json") ] }]]></ee:set-payload>
+            </ee:message>
+        </ee:transform>
+        <ee:transform doc:name="Shopify to Canonical">
+            <ee:message>
+                <ee:set-payload resource="dwl/shopify-order-to-canonical.dwl"/>
+            </ee:message>
+        </ee:transform>
+        <set-payload value="#[output application/json --- payload[0]]" doc:name="Single order"/>
+        <vm:publish doc:name="Publish to order-sync-q" config-ref="VM_Config" queueName="order-sync-q"/>
+        <set-payload doc:name="Accepted"
+                     value='#[output application/json --- { accepted: true, orderId: payload.orderId, correlationId: correlationId }]'/>
+    </flow>
+
+    <!-- Manual trigger: POST /api/v1/sync/{orders|accounts|inventory|replay} -->
+    <flow name="exp-manual-sync-flow">
+        <http:listener doc:name="POST /api/v1/sync/{entity}" config-ref="HTTP_Listener_config"
+                       path="/api/v1/sync/{entity}" allowedMethods="POST">
+            <http:response statusCode="#[vars.httpStatus default 200]"/>
+            <http:error-response statusCode="#[vars.httpStatus default 500]">
+                <http:body><![CDATA[#[payload]]]></http:body>
+            </http:error-response>
+        </http:listener>
+        <flow-ref doc:name="Require API key" name="exp-require-api-key"/>
+        <choice doc:name="Entity">
+            <when expression="#[attributes.uriParams.entity == 'orders']">
+                <flow-ref doc:name="Poll orders" name="prc-order-poll-flow"/>
+            </when>
+            <when expression="#[attributes.uriParams.entity == 'accounts']">
+                <flow-ref doc:name="Sync accounts" name="prc-account-sync-flow"/>
+            </when>
+            <when expression="#[attributes.uriParams.entity == 'inventory']">
+                <flow-ref doc:name="Sync inventory" name="prc-inventory-sync-flow"/>
+            </when>
+            <when expression="#[attributes.uriParams.entity == 'replay']">
+                <flow-ref doc:name="Replay failures" name="prc-retry-replay-flow"/>
+            </when>
+            <otherwise>
+                <raise-error doc:name="Unknown entity" type="APP:BAD_REQUEST"
+                             description="#['Unknown sync target: ' ++ attributes.uriParams.entity ++ '. Use orders, accounts, inventory or replay.']"/>
+            </otherwise>
+        </choice>
+    </flow>
+
+    <!-- GET /api/v1/metrics/sync?days=7 : success rate from dbo.vw_sync_success_rate_daily -->
+    <flow name="exp-sync-metrics-flow">
+        <http:listener doc:name="GET /api/v1/metrics/sync" config-ref="HTTP_Listener_config"
+                       path="/api/v1/metrics/sync" allowedMethods="GET">
+            <http:response statusCode="#[vars.httpStatus default 200]"/>
+            <http:error-response statusCode="#[vars.httpStatus default 500]">
+                <http:body><![CDATA[#[payload]]]></http:body>
+            </http:error-response>
+        </http:listener>
+        <flow-ref doc:name="Require API key" name="exp-require-api-key"/>
+        <set-variable variableName="days" value="#[(attributes.queryParams.days default '7') as Number]" doc:name="days"/>
+        <db:select doc:name="Query Success Rate" config-ref="AzureSQL_Database_config">
+            <db:sql><![CDATA[SELECT sync_date, channel, entity_type, entities, attempts, succeeded, success_rate_pct
+FROM dbo.vw_sync_success_rate_daily
+WHERE sync_date >= DATEADD(DAY, -1 * :days, CAST(SYSUTCDATETIME() AS DATE))
+ORDER BY sync_date DESC, channel, entity_type]]></db:sql>
+            <db:input-parameters><![CDATA[#[{ days: vars.days }]]]></db:input-parameters>
+        </db:select>
+        <ee:transform doc:name="Shape metrics">
+            <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+var entities = sum(payload.entities default [])
+var succeeded = sum(payload.succeeded default [])
+---
+{
+    windowDays: vars.days,
+    overall: {
+        entities: entities,
+        succeeded: succeeded,
+        successRatePct: if (entities > 0) round(succeeded * 10000 / entities) / 100 else null
+    },
+    daily: payload map (r) -> {
+        date: r.sync_date as String,
+        channel: r.channel,
+        entityType: r.entity_type,
+        entities: r.entities,
+        attempts: r.attempts,
+        succeeded: r.succeeded,
+        successRatePct: r.success_rate_pct
+    }
+}]]></ee:set-payload>
+            </ee:message>
+        </ee:transform>
+    </flow>
+
+    <!-- GET /api/v1/errors?status=DEAD_LETTER : operational view of the error log -->
+    <flow name="exp-sync-errors-flow">
+        <http:listener doc:name="GET /api/v1/errors" config-ref="HTTP_Listener_config"
+                       path="/api/v1/errors" allowedMethods="GET">
+            <http:response statusCode="#[vars.httpStatus default 200]"/>
+            <http:error-response statusCode="#[vars.httpStatus default 500]">
+                <http:body><![CDATA[#[payload]]]></http:body>
+            </http:error-response>
+        </http:listener>
+        <flow-ref doc:name="Require API key" name="exp-require-api-key"/>
+        <db:select doc:name="Query Error Log" config-ref="AzureSQL_Database_config">
+            <db:sql><![CDATA[SELECT TOP (100) error_id, channel, entity_type, entity_key, error_type, error_message,
+       status, retry_count, next_retry_at, created_at, updated_at
+FROM dbo.sync_error_log
+WHERE status = :status
+ORDER BY updated_at DESC]]></db:sql>
+            <db:input-parameters><![CDATA[#[{ status: upper(attributes.queryParams.status default 'PENDING_RETRY') }]]]></db:input-parameters>
+        </db:select>
+        <set-payload value="#[output application/json --- payload]" doc:name="To JSON"/>
+    </flow>
+</mule>

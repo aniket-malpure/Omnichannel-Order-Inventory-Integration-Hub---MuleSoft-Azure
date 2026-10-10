@@ -1,0 +1,120 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+      xmlns:db="http://www.mulesoft.org/schema/mule/db"
+      xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/db http://www.mulesoft.org/schema/mule/db/current/mule-db.xsd
+        http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd">
+
+    <!-- Default handler for experience-layer flows: maps errors to HTTP status codes. -->
+    <error-handler name="global-error-handler">
+        <on-error-propagate type="APP:UNAUTHORIZED, APP:INVALID_SIGNATURE" doc:name="401">
+            <set-variable variableName="httpStatus" value="#[401]" doc:name="httpStatus 401"/>
+            <ee:transform doc:name="Unauthorized body">
+                <ee:message>
+                    <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{ error: "UNAUTHORIZED", message: error.description, correlationId: correlationId }]]></ee:set-payload>
+                </ee:message>
+            </ee:transform>
+        </on-error-propagate>
+        <on-error-propagate type="APP:BAD_REQUEST, JSON:SCHEMA_NOT_HONOURED" doc:name="400">
+            <set-variable variableName="httpStatus" value="#[400]" doc:name="httpStatus 400"/>
+            <ee:transform doc:name="Bad request body">
+                <ee:message>
+                    <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{ error: "BAD_REQUEST", message: error.description, correlationId: correlationId }]]></ee:set-payload>
+                </ee:message>
+            </ee:transform>
+        </on-error-propagate>
+        <on-error-propagate type="ANY" doc:name="500">
+            <logger level="ERROR" doc:name="Log unhandled"
+                    message="#['[' ++ correlationId ++ '] Unhandled ' ++ error.errorType.namespace ++ ':' ++ error.errorType.identifier ++ ' - ' ++ (error.description default '')]"/>
+            <set-variable variableName="httpStatus" value="#[500]" doc:name="httpStatus 500"/>
+            <ee:transform doc:name="Server error body">
+                <ee:message>
+                    <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{ error: "INTERNAL_ERROR", message: "Unexpected error, see logs", correlationId: correlationId }]]></ee:set-payload>
+                </ee:message>
+            </ee:transform>
+        </on-error-propagate>
+    </error-handler>
+
+    <!--
+        Persists a failed sync to dbo.sync_error_log (and a FAILED audit row) so the
+        retry-replay scheduler can pick it up. Expects vars: channel, entityType,
+        entityKey, sourceRecord and optionally retryErrorId (when this was a replay).
+    -->
+    <flow name="common-log-sync-error-flow">
+        <logger level="WARN" doc:name="Log sync failure"
+                message="#['[' ++ correlationId ++ '] Sync failed ' ++ (vars.entityType default '') ++ ' ' ++ (vars.entityKey default '') ++ ': ' ++ (error.errorType.identifier default '') ++ ' - ' ++ (error.description default '')]"/>
+        <try doc:name="Try persist error">
+            <db:stored-procedure doc:name="Log Sync Error" config-ref="AzureSQL_Database_config">
+                <db:sql><![CDATA[{call dbo.usp_log_sync_error(:channel, :entityType, :entityKey, :errorType, :errorMessage, :payloadJson, :isRetryable, :correlationId, :retryOfErrorId)}]]></db:sql>
+                <db:input-parameters><![CDATA[#[%dw 2.0
+var nonRetryableErrors = ["SAPB1_VALIDATION", "SCHEMA_NOT_HONOURED", "INVALID_SIGNATURE"]
+var replayableEntities = ["ORDER", "ACCOUNT"]
+var errorId = error.errorType.identifier default "UNKNOWN"
+var message = error.description default "No description"
+---
+{
+    channel: vars.channel default "UNKNOWN",
+    entityType: vars.entityType default "UNKNOWN",
+    entityKey: vars.entityKey default correlationId,
+    errorType: (error.errorType.namespace default "MULE") ++ ":" ++ errorId,
+    errorMessage: if (sizeOf(message) > 3990) message[0 to 3989] else message,
+    payloadJson: write(vars.sourceRecord default {}, "application/json", { indent: false }),
+    isRetryable: (replayableEntities contains (vars.entityType default "")) and !(nonRetryableErrors contains errorId),
+    correlationId: correlationId,
+    retryOfErrorId: vars.retryErrorId
+}]]]></db:input-parameters>
+            </db:stored-procedure>
+            <error-handler>
+                <on-error-continue type="ANY" doc:name="DB unavailable">
+                    <logger level="ERROR" doc:name="Log persistence failure"
+                            message="#['[' ++ correlationId ++ '] Could not persist sync error to Azure SQL: ' ++ (error.description default '')]"/>
+                </on-error-continue>
+            </error-handler>
+        </try>
+    </flow>
+
+    <!-- Writes one row to dbo.sync_audit. Expects vars: channel, entityType, entityKey, outcome, targetRef, startMillis. -->
+    <flow name="common-log-sync-audit-flow">
+        <try doc:name="Try audit">
+            <db:stored-procedure doc:name="Log Sync Audit" config-ref="AzureSQL_Database_config">
+                <db:sql><![CDATA[{call dbo.usp_log_sync_audit(:channel, :entityType, :entityKey, :outcome, :targetRef, :durationMs, :correlationId)}]]></db:sql>
+                <db:input-parameters><![CDATA[#[{
+    channel: vars.channel,
+    entityType: vars.entityType,
+    entityKey: vars.entityKey,
+    outcome: vars.outcome,
+    targetRef: vars.targetRef,
+    durationMs: (now() as Number { unit: "milliseconds" }) - (vars.startMillis default (now() as Number { unit: "milliseconds" })),
+    correlationId: correlationId
+}]]]></db:input-parameters>
+            </db:stored-procedure>
+            <choice doc:name="Was this a replay?">
+                <when expression="#[vars.retryErrorId != null and vars.outcome != 'FAILED']">
+                    <db:stored-procedure doc:name="Resolve Sync Error" config-ref="AzureSQL_Database_config">
+                        <db:sql><![CDATA[{call dbo.usp_resolve_sync_error(:errorId)}]]></db:sql>
+                        <db:input-parameters><![CDATA[#[{ errorId: vars.retryErrorId }]]]></db:input-parameters>
+                    </db:stored-procedure>
+                </when>
+            </choice>
+            <error-handler>
+                <on-error-continue type="ANY" doc:name="DB unavailable">
+                    <logger level="ERROR" doc:name="Log audit failure"
+                            message="#['[' ++ correlationId ++ '] Could not write audit row: ' ++ (error.description default '')]"/>
+                </on-error-continue>
+            </error-handler>
+        </try>
+    </flow>
+</mule>

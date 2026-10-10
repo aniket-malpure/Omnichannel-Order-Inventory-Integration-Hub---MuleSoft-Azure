@@ -1,0 +1,83 @@
+# CloudHub 2.0 profile. Secrets are NOT stored here: they are injected as
+# protected properties at deploy time (see pom.xml secureProperties and the
+# GitHub Actions workflow). Replace the hostnames with your own tenants.
+http:
+  port: "8081"
+
+api:
+  key: "override-at-deploy"
+
+schedule:
+  orderPollMinutes: "2"
+  inventorySyncMinutes: "15"
+  accountSyncMinutes: "30"
+  retryReplayMinutes: "5"
+
+retry:
+  maxAttempts: "3"
+  backoffMillis: "5000"
+  replayBatchSize: "100"
+
+shopify:
+  protocol: "HTTPS"
+  host: "your-store.myshopify.com"
+  port: "443"
+  basePath: "/"
+  apiVersion: "2025-07"
+  token: "override-at-deploy"
+  locationId: "00000000000"
+  webhookSecret: "override-at-deploy"
+
+amazon:
+  auth:
+    protocol: "HTTPS"
+    host: "api.amazon.com"
+    port: "443"
+    basePath: "/"
+  spapi:
+    protocol: "HTTPS"
+    host: "sellingpartnerapi-na.amazon.com"
+    port: "443"
+    basePath: "/"
+  clientId: "amzn1.application-oa2-client.replace-me"
+  clientSecret: "override-at-deploy"
+  refreshToken: "override-at-deploy"
+  marketplaceId: "ATVPDKIKX0DER"
+  sellerId: "REPLACE_ME"
+
+sapb1:
+  protocol: "HTTPS"
+  host: "sapb1.example.com"
+  port: "50000"
+  basePath: "/"
+  companyDb: "SBOPROD"
+  user: "integration"
+  password: "override-at-deploy"
+  defaultWarehouse: "01"
+  taxCode: "EX"
+  freightExpenseCode: "1"
+  cardCode:
+    shopify: "C-WEB-SHOPIFY"
+    amazon: "C-WEB-AMAZON"
+    default: "C-WEB-OTHER"
+
+salesforce:
+  protocol: "HTTPS"
+  host: "your-domain.my.salesforce.com"
+  port: "443"
+  basePath: "/"
+  apiVersion: "v60.0"
+  clientId: "replace-me"
+  clientSecret: "override-at-deploy"
+
+wms:
+  protocol: "HTTPS"
+  host: "wms.example.com"
+  port: "443"
+  basePath: "/"
+  apiKey: "override-at-deploy"
+
+azuresql:
+  url: "jdbc:sqlserver://omnihub-sql.database.windows.net:1433;databaseName=omnihub;encrypt=true;trustServerCertificate=false;hostNameInCertificate=*.database.windows.net;loginTimeout=30"
+  user: "omnihub_app"
+  password: "override-at-deploy"

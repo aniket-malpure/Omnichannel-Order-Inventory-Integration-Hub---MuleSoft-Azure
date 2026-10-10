@@ -1,0 +1,153 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+      xmlns:vm="http://www.mulesoft.org/schema/mule/vm"
+      xmlns:os="http://www.mulesoft.org/schema/mule/os"
+      xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+      xmlns:json="http://www.mulesoft.org/schema/mule/json"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/vm http://www.mulesoft.org/schema/mule/vm/current/mule-vm.xsd
+        http://www.mulesoft.org/schema/mule/os http://www.mulesoft.org/schema/mule/os/current/mule-os.xsd
+        http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+        http://www.mulesoft.org/schema/mule/json http://www.mulesoft.org/schema/mule/json/current/mule-json.xsd">
+
+    <!-- =====================================================================
+         PROCESS LAYER: Order sync (Shopify + Amazon -> canonical -> SAP B1)
+         Poller publishes canonical orders to a persistent VM queue; workers
+         consume them so a slow or failing ERP never blocks channel polling.
+         ===================================================================== -->
+
+    <flow name="prc-order-poll-scheduler-flow">
+        <scheduler doc:name="Order poll schedule">
+            <scheduling-strategy>
+                <fixed-frequency frequency="${schedule.orderPollMinutes}" timeUnit="MINUTES"/>
+            </scheduling-strategy>
+        </scheduler>
+        <flow-ref doc:name="Poll channels" name="prc-order-poll-flow"/>
+    </flow>
+
+    <!-- Returns { published, shopify, amazon, since } -->
+    <flow name="prc-order-poll-flow">
+        <os:retrieve doc:name="Get Orders Watermark" key="orders_watermark" objectStore="Watermark_Store" target="since">
+            <os:default-value><![CDATA[#[import modules::Utils --- Utils::isoTimestamp(now() - |PT1H|)]]]></os:default-value>
+        </os:retrieve>
+        <set-variable variableName="runStartedAt" doc:name="runStartedAt"
+                      value="#[import modules::Utils --- Utils::isoTimestamp(now())]"/>
+
+        <flow-ref doc:name="Fetch Shopify Orders" name="sys-shopify-get-orders-flow"/>
+        <ee:transform doc:name="Shopify to Canonical">
+            <ee:message>
+                <ee:set-payload resource="dwl/shopify-order-to-canonical.dwl"/>
+            </ee:message>
+        </ee:transform>
+        <set-variable variableName="shopifyOrders" value="#[payload]" doc:name="shopifyOrders"/>
+
+        <flow-ref doc:name="Fetch Amazon Orders with Items" name="sys-amazon-get-orders-with-items-flow"/>
+        <ee:transform doc:name="Amazon to Canonical">
+            <ee:message>
+                <ee:set-payload resource="dwl/amazon-order-to-canonical.dwl"/>
+            </ee:message>
+        </ee:transform>
+        <set-variable variableName="canonicalOrders" value="#[vars.shopifyOrders ++ payload]" doc:name="canonicalOrders"/>
+
+        <foreach doc:name="Publish each order" collection="#[vars.canonicalOrders]">
+            <set-payload value="#[output application/json --- payload]" doc:name="Serialize JSON"/>
+            <vm:publish doc:name="Publish to order-sync-q" config-ref="VM_Config" queueName="order-sync-q"/>
+        </foreach>
+
+        <os:store doc:name="Advance Watermark" key="orders_watermark" objectStore="Watermark_Store">
+            <os:value><![CDATA[#[vars.runStartedAt]]]></os:value>
+        </os:store>
+        <ee:transform doc:name="Poll summary">
+            <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+    published: sizeOf(vars.canonicalOrders),
+    shopify: sizeOf(vars.shopifyOrders),
+    amazon: sizeOf(vars.canonicalOrders) - sizeOf(vars.shopifyOrders),
+    since: vars.since
+}]]></ee:set-payload>
+            </ee:message>
+        </ee:transform>
+        <logger level="INFO" doc:name="Log poll summary" message="#['[' ++ correlationId ++ '] Order poll: ' ++ write(payload, 'application/json', { indent: false })]"/>
+    </flow>
+
+    <!-- Consumes canonical orders and creates SAP B1 sales orders idempotently. -->
+    <flow name="prc-order-sync-worker-flow" maxConcurrency="4">
+        <vm:listener doc:name="Listen order-sync-q" config-ref="VM_Config" queueName="order-sync-q" numberOfConsumers="4"/>
+
+        <ee:transform doc:name="Init sync context">
+            <ee:variables>
+                <ee:set-variable variableName="order"><![CDATA[%dw 2.0
+output application/java
+---
+payload - "_meta"]]></ee:set-variable>
+                <ee:set-variable variableName="sourceRecord"><![CDATA[%dw 2.0
+output application/java
+---
+payload - "_meta"]]></ee:set-variable>
+                <ee:set-variable variableName="retryErrorId"><![CDATA[%dw 2.0
+output application/java
+---
+payload."_meta".retryErrorId]]></ee:set-variable>
+                <ee:set-variable variableName="channel"><![CDATA[%dw 2.0
+output application/java
+---
+payload.channel default "UNKNOWN"]]></ee:set-variable>
+                <ee:set-variable variableName="entityKey"><![CDATA[%dw 2.0
+output application/java
+---
+payload.orderId default "UNKNOWN"]]></ee:set-variable>
+            </ee:variables>
+        </ee:transform>
+        <set-variable variableName="entityType" value="ORDER" doc:name="entityType"/>
+        <set-variable variableName="startMillis" value="#[now() as Number { unit: 'milliseconds' }]" doc:name="startMillis"/>
+        <set-variable variableName="sapValidationError" value="#[null]" doc:name="Reset sapValidationError"/>
+
+        <json:validate-schema doc:name="Validate canonical order" schema="schemas/canonical-order.schema.json">
+            <json:content><![CDATA[#[write(vars.order, "application/json")]]]></json:content>
+        </json:validate-schema>
+
+        <flow-ref doc:name="Find existing SAP order" name="sys-sapb1-find-order-flow" target="existingOrders"/>
+
+        <choice doc:name="Already in SAP B1?">
+            <when expression="#[!isEmpty(vars.existingOrders.value default [])]">
+                <set-variable variableName="outcome" value="SKIPPED_DUPLICATE" doc:name="outcome SKIPPED_DUPLICATE"/>
+                <set-variable variableName="targetRef" value="#[vars.existingOrders.value[0].DocEntry as String]" doc:name="targetRef"/>
+            </when>
+            <otherwise>
+                <ee:transform doc:name="Canonical to SAP B1 Order">
+                    <ee:message>
+                        <ee:set-payload resource="dwl/canonical-to-sapb1-order.dwl"/>
+                    </ee:message>
+                </ee:transform>
+                <until-successful doc:name="Retry transient SAP failures"
+                                  maxRetries="${retry.maxAttempts}" millisBetweenRetries="${retry.backoffMillis}">
+                    <flow-ref doc:name="Create SAP order" name="sys-sapb1-create-order-flow"/>
+                </until-successful>
+                <choice doc:name="SAP validation error?">
+                    <when expression="#[vars.sapValidationError != null]">
+                        <raise-error doc:name="Non-retryable" type="APP:SAPB1_VALIDATION"
+                                     description="#['SAP B1 rejected order ' ++ vars.entityKey ++ ': ' ++ vars.sapValidationError]"/>
+                    </when>
+                </choice>
+                <set-variable variableName="outcome" value="SYNCED" doc:name="outcome SYNCED"/>
+                <set-variable variableName="targetRef" value="#[payload.DocEntry as String]" doc:name="targetRef"/>
+            </otherwise>
+        </choice>
+
+        <flow-ref doc:name="Audit" name="common-log-sync-audit-flow"/>
+        <logger level="INFO" doc:name="Log result"
+                message="#['[' ++ correlationId ++ '] ' ++ vars.entityKey ++ ' -> ' ++ vars.outcome ++ ' (SAP DocEntry ' ++ (vars.targetRef default '-') ++ ')']"/>
+
+        <error-handler>
+            <on-error-continue type="ANY" doc:name="Log and queue for replay">
+                <flow-ref doc:name="Log sync error" name="common-log-sync-error-flow"/>
+            </on-error-continue>
+        </error-handler>
+    </flow>
+</mule>

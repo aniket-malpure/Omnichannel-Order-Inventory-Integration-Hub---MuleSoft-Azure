@@ -1,0 +1,32 @@
+[
+  {
+    "order": {
+      "AmazonOrderId": "113-4455667-1234567",
+      "PurchaseDate": "2026-10-09T14:05:00Z",
+      "LastUpdateDate": "2026-10-09T14:10:00Z",
+      "OrderStatus": "Unshipped",
+      "OrderTotal": { "CurrencyCode": "USD", "Amount": "66.47" },
+      "BuyerInfo": { "BuyerEmail": "abc123xyz@marketplace.amazon.com" },
+      "ShippingAddress": {
+        "Name": "Priya Raman Iyer", "AddressLine1": "1500 Market St", "City": "Philadelphia",
+        "StateOrRegion": "PA", "PostalCode": "19102", "CountryCode": "US"
+      }
+    },
+    "items": [
+      {
+        "SellerSKU": "GLS-SAFETY-CLR", "Title": "Safety Glasses Clear", "QuantityOrdered": 3,
+        "ItemPrice": { "CurrencyCode": "USD", "Amount": "44.97" },
+        "ItemTax": { "CurrencyCode": "USD", "Amount": "2.70" },
+        "ShippingPrice": { "CurrencyCode": "USD", "Amount": "5.99" },
+        "PromotionDiscount": { "CurrencyCode": "USD", "Amount": "0.00" }
+      },
+      {
+        "SellerSKU": "glv-impact-xl", "Title": "Impact Glove XL", "QuantityOrdered": 1,
+        "ItemPrice": { "CurrencyCode": "USD", "Amount": "14.99" },
+        "ItemTax": { "CurrencyCode": "USD", "Amount": "0.90" },
+        "ShippingPrice": { "CurrencyCode": "USD", "Amount": "0.00" },
+        "PromotionDiscount": { "CurrencyCode": "USD", "Amount": "3.08" }
+      }
+    ]
+  }
+]

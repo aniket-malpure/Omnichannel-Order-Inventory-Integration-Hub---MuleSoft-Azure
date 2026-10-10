@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+      xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+      xmlns:munit="http://www.mulesoft.org/schema/mule/munit"
+      xmlns:munit-tools="http://www.mulesoft.org/schema/mule/munit-tools"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+        http://www.mulesoft.org/schema/mule/munit http://www.mulesoft.org/schema/mule/munit/current/mule-munit.xsd
+        http://www.mulesoft.org/schema/mule/munit-tools http://www.mulesoft.org/schema/mule/munit-tools/current/mule-munit-tools.xsd">
+
+    <munit:config name="dataweave-mapping-test-suite.xml"/>
+
+    <munit:test name="shopify-order-maps-to-canonical" description="Shopify order normalizes SKUs, money and email">
+        <munit:execution>
+            <munit:set-event doc:name="Shopify orders">
+                <munit:payload value="#[readUrl('classpath://test-data/shopify-orders.json', 'application/json')]"/>
+            </munit:set-event>
+            <ee:transform doc:name="Shopify to Canonical">
+                <ee:message>
+                    <ee:set-payload resource="dwl/shopify-order-to-canonical.dwl"/>
+                </ee:message>
+            </ee:transform>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[payload[0].orderId]" is="#[MunitTools::equalTo('SHP-5501234567001')]"/>
+            <munit-tools:assert-that expression="#[payload[0].customer.email]" is="#[MunitTools::equalTo('jordan.lee@example.com')]"/>
+            <munit-tools:assert-that expression="#[payload[0].lines[0].sku]" is="#[MunitTools::equalTo('GLV-CUT-A6-L')]"/>
+            <munit-tools:assert-that expression="#[payload[0].lines[1].sku]" is="#[MunitTools::equalTo('SLV-CUT-A5-18')]"/>
+            <munit-tools:assert-that expression="#[payload[0].totals.shipping]" is="#[MunitTools::equalTo(9.1)]"/>
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="amazon-order-derives-unit-price" description="SP-API line totals become per-unit prices">
+        <munit:execution>
+            <munit:set-event doc:name="Amazon orders with items">
+                <munit:payload value="#[readUrl('classpath://test-data/amazon-orders-with-items.json', 'application/json')]"/>
+            </munit:set-event>
+            <ee:transform doc:name="Amazon to Canonical">
+                <ee:message>
+                    <ee:set-payload resource="dwl/amazon-order-to-canonical.dwl"/>
+                </ee:message>
+            </ee:transform>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[payload[0].lines[0].unitPrice]" is="#[MunitTools::equalTo(14.99)]"/>
+            <munit-tools:assert-that expression="#[payload[0].customer.lastName]" is="#[MunitTools::equalTo('Raman Iyer')]"/>
+            <munit-tools:assert-that expression="#[payload[0].totals.grandTotal]" is="#[MunitTools::equalTo(66.47)]"/>
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="canonical-order-maps-to-sapb1" description="SAP order carries idempotency key, discount % and freight">
+        <munit:execution>
+            <munit:set-event doc:name="Canonical order">
+                <munit:payload value="#[readUrl('classpath://test-data/canonical-order.json', 'application/json')]"/>
+            </munit:set-event>
+            <ee:transform doc:name="Canonical to SAP B1">
+                <ee:message>
+                    <ee:set-payload resource="dwl/canonical-to-sapb1-order.dwl"/>
+                </ee:message>
+            </ee:transform>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[payload.NumAtCard]" is="#[MunitTools::equalTo('SHP-5501234567001')]"/>
+            <munit-tools:assert-that expression="#[payload.CardCode]" is="#[MunitTools::equalTo('C-WEB-SHOPIFY')]"/>
+            <munit-tools:assert-that expression="#[payload.DocumentLines[0].DiscountPercent]" is="#[MunitTools::equalTo(8.34)]"/>
+            <munit-tools:assert-that expression="#[payload.DocDueDate]" is="#[MunitTools::equalTo('2026-10-12')]"/>
+            <munit-tools:assert-that expression="#[sizeOf(payload.DocumentAdditionalExpenses)]" is="#[MunitTools::equalTo(1)]"/>
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="wms-csv-aggregates-by-sku" description="WMS rows sum across warehouses and never go negative">
+        <munit:execution>
+            <munit:set-event doc:name="WMS CSV">
+                <munit:payload value="#[readUrl('classpath://test-data/wms-inventory.csv', 'application/csv')]"/>
+            </munit:set-event>
+            <ee:transform doc:name="WMS to Canonical">
+                <ee:message>
+                    <ee:set-payload resource="dwl/wms-inventory-to-canonical.dwl"/>
+                </ee:message>
+            </ee:transform>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[sizeOf(payload)]" is="#[MunitTools::equalTo(3)]"/>
+            <munit-tools:assert-that expression="#[(payload filter ($.sku == 'GLV-CUT-A6-L'))[0].available]" is="#[MunitTools::equalTo(133)]"/>
+            <munit-tools:assert-that expression="#[(payload filter ($.sku == 'SLV-CUT-A5-18'))[0].available]" is="#[MunitTools::equalTo(0)]"/>
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="salesforce-account-maps-to-business-partner" description="Account without AccountNumber falls back to Id suffix">
+        <munit:execution>
+            <munit:set-event doc:name="Salesforce accounts">
+                <munit:payload value="#[readUrl('classpath://test-data/salesforce-accounts.json', 'application/json')]"/>
+            </munit:set-event>
+            <ee:transform doc:name="Salesforce to Canonical">
+                <ee:message>
+                    <ee:set-payload resource="dwl/salesforce-account-to-canonical.dwl"/>
+                </ee:message>
+            </ee:transform>
+            <set-payload value="#[output application/json --- payload[1]]" doc:name="Second account"/>
+            <ee:transform doc:name="Canonical to SAP BP">
+                <ee:message>
+                    <ee:set-payload resource="dwl/canonical-to-sapb1-bp.dwl"/>
+                </ee:message>
+            </ee:transform>
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[payload.CardCode]" is="#[MunitTools::equalTo('CXYZ12IAF')]"/>
+            <munit-tools:assert-that expression="#[payload.BPAddresses[0].Country]" is="#[MunitTools::equalTo('US')]"/>
+        </munit:validation>
+    </munit:test>
+</mule>

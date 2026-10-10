@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns:os="http://www.mulesoft.org/schema/mule/os"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+        http://www.mulesoft.org/schema/mule/os http://www.mulesoft.org/schema/mule/os/current/mule-os.xsd">
+
+    <!-- =====================================================================
+         SYSTEM LAYER: Salesforce REST API (OAuth 2.0 client credentials)
+         ===================================================================== -->
+
+    <flow name="sys-salesforce-get-token-flow">
+        <os:retrieve doc:name="Get Cached Salesforce Token" key="salesforce_token" objectStore="Token_Store" target="sfToken">
+            <os:default-value><![CDATA[#[""]]]></os:default-value>
+        </os:retrieve>
+        <choice doc:name="Token cached?">
+            <when expression="#[isEmpty(vars.sfToken)]">
+                <http:request method="POST" doc:name="Salesforce OAuth Token" config-ref="Salesforce_Request_config"
+                              path="/services/oauth2/token">
+                    <http:body><![CDATA[#[output application/x-www-form-urlencoded
+---
+{
+    grant_type: "client_credentials",
+    client_id: p('salesforce.clientId'),
+    client_secret: p('salesforce.clientSecret')
+}]]]></http:body>
+                </http:request>
+                <set-variable variableName="sfToken" value="#[payload.access_token]" doc:name="sfToken"/>
+                <os:store doc:name="Cache Salesforce Token" key="salesforce_token" objectStore="Token_Store">
+                    <os:value><![CDATA[#[vars.sfToken]]]></os:value>
+                </os:store>
+            </when>
+        </choice>
+        <set-payload value="#[vars.sfToken]" doc:name="Return token"/>
+    </flow>
+
+    <!-- Expects vars.since. Returns the SOQL query response { totalSize, done, records: [...] } -->
+    <flow name="sys-salesforce-query-accounts-flow">
+        <flow-ref doc:name="Get Salesforce Token" name="sys-salesforce-get-token-flow" target="sfToken"/>
+        <http:request method="GET" doc:name="Salesforce Query Accounts" config-ref="Salesforce_Request_config"
+                      path="/services/data/${salesforce.apiVersion}/query">
+            <http:headers><![CDATA[#[{ Authorization: "Bearer " ++ vars.sfToken }]]]></http:headers>
+            <http:query-params><![CDATA[#[{
+    q: "SELECT Id, Name, AccountNumber, Type, Industry, Phone, Website, "
+       ++ "BillingStreet, BillingCity, BillingState, BillingPostalCode, BillingCountry, LastModifiedDate "
+       ++ "FROM Account WHERE LastModifiedDate > " ++ vars.since
+       ++ " ORDER BY LastModifiedDate LIMIT 2000"
+}]]]></http:query-params>
+        </http:request>
+        <error-handler>
+            <on-error-propagate type="HTTP:UNAUTHORIZED" doc:name="Token expired">
+                <os:remove doc:name="Drop Salesforce Token" key="salesforce_token" objectStore="Token_Store"/>
+            </on-error-propagate>
+        </error-handler>
+    </flow>
+
+    <!-- =====================================================================
+         SYSTEM LAYER: Warehouse Management System (CSV inventory export)
+         ===================================================================== -->
+
+    <!-- Returns CSV rows: sku, warehouse_code, on_hand, allocated, damaged, updated_at -->
+    <flow name="sys-wms-get-inventory-flow">
+        <http:request method="GET" doc:name="WMS Inventory Export" config-ref="WMS_Request_config"
+                      path="/api/v1/inventory/export" outputMimeType="application/csv; header=true">
+            <http:query-params><![CDATA[#[{ format: "csv" }]]]></http:query-params>
+        </http:request>
+    </flow>
+</mule>

@@ -1,0 +1,82 @@
+# Local profile: every external system points at the mock services
+# (docker compose up) and SQL Server 2022 standing in for Azure SQL.
+http:
+  port: "8081"
+
+api:
+  key: "local-dev-api-key"
+
+schedule:
+  orderPollMinutes: "2"
+  inventorySyncMinutes: "15"
+  accountSyncMinutes: "30"
+  retryReplayMinutes: "5"
+
+retry:
+  maxAttempts: "3"
+  backoffMillis: "2000"
+  replayBatchSize: "50"
+
+shopify:
+  protocol: "HTTP"
+  host: "localhost"
+  port: "8090"
+  basePath: "/shopify"
+  apiVersion: "2025-07"
+  token: "mock-shopify-token"
+  locationId: "71234567890"
+  webhookSecret: "local-webhook-secret"
+
+amazon:
+  auth:
+    protocol: "HTTP"
+    host: "localhost"
+    port: "8090"
+    basePath: "/amazon"
+  spapi:
+    protocol: "HTTP"
+    host: "localhost"
+    port: "8090"
+    basePath: "/amazon"
+  clientId: "amzn1.application-oa2-client.mock"
+  clientSecret: "mock-amazon-secret"
+  refreshToken: "Atzr|mock-refresh-token"
+  marketplaceId: "ATVPDKIKX0DER"
+  sellerId: "A1MOCKSELLER"
+
+sapb1:
+  protocol: "HTTP"
+  host: "localhost"
+  port: "8090"
+  basePath: "/sapb1"
+  companyDb: "SBODEMOUS"
+  user: "manager"
+  password: "mock-sap-password"
+  defaultWarehouse: "01"
+  taxCode: "EX"
+  freightExpenseCode: "1"
+  cardCode:
+    shopify: "C-WEB-SHOPIFY"
+    amazon: "C-WEB-AMAZON"
+    default: "C-WEB-OTHER"
+
+salesforce:
+  protocol: "HTTP"
+  host: "localhost"
+  port: "8090"
+  basePath: "/salesforce"
+  apiVersion: "v60.0"
+  clientId: "mock-sf-client-id"
+  clientSecret: "mock-sf-client-secret"
+
+wms:
+  protocol: "HTTP"
+  host: "localhost"
+  port: "8090"
+  basePath: "/wms"
+  apiKey: "mock-wms-key"
+
+azuresql:
+  url: "jdbc:sqlserver://localhost:1433;databaseName=omnihub;encrypt=true;trustServerCertificate=true;loginTimeout=30"
+  user: "sa"
+  password: "Local_Dev_Passw0rd!"

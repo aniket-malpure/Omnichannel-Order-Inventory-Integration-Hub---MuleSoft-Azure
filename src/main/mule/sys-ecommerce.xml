@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns:os="http://www.mulesoft.org/schema/mule/os"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+        http://www.mulesoft.org/schema/mule/os http://www.mulesoft.org/schema/mule/os/current/mule-os.xsd">
+
+    <!-- =====================================================================
+         SYSTEM LAYER: Shopify Admin REST API
+         ===================================================================== -->
+
+    <!-- Expects vars.since (ISO timestamp). Returns { orders: [...] } -->
+    <flow name="sys-shopify-get-orders-flow">
+        <http:request method="GET" doc:name="Shopify Get Orders" config-ref="Shopify_Request_config"
+                      path="/admin/api/${shopify.apiVersion}/orders.json">
+            <http:query-params><![CDATA[#[{
+    status: "any",
+    updated_at_min: vars.since,
+    limit: "250"
+}]]]></http:query-params>
+        </http:request>
+    </flow>
+
+    <!-- Returns { products: [ { id, variants: [ { sku, inventory_item_id } ] } ] } -->
+    <flow name="sys-shopify-get-products-flow">
+        <http:request method="GET" doc:name="Shopify Get Products" config-ref="Shopify_Request_config"
+                      path="/admin/api/${shopify.apiVersion}/products.json">
+            <http:query-params><![CDATA[#[{ fields: "id,title,variants", limit: "250" }]]]></http:query-params>
+        </http:request>
+    </flow>
+
+    <!-- Payload: { location_id, inventory_item_id, available } -->
+    <flow name="sys-shopify-set-inventory-flow">
+        <http:request method="POST" doc:name="Shopify Set Inventory Level" config-ref="Shopify_Request_config"
+                      path="/admin/api/${shopify.apiVersion}/inventory_levels/set.json"/>
+    </flow>
+
+    <!-- =====================================================================
+         SYSTEM LAYER: Amazon Selling Partner API (Orders v0, Listings 2021-08-01)
+         ===================================================================== -->
+
+    <!-- Returns a Login-with-Amazon access token, cached for 50 minutes. -->
+    <flow name="sys-amazon-get-access-token-flow">
+        <os:retrieve doc:name="Get Cached LWA Token" key="amazon_lwa_token" objectStore="Token_Store" target="lwaToken">
+            <os:default-value><![CDATA[#[""]]]></os:default-value>
+        </os:retrieve>
+        <choice doc:name="Token cached?">
+            <when expression="#[isEmpty(vars.lwaToken)]">
+                <http:request method="POST" doc:name="Amazon LWA Token" config-ref="Amazon_Auth_Request_config"
+                              path="/auth/o2/token">
+                    <http:body><![CDATA[#[output application/x-www-form-urlencoded
+---
+{
+    grant_type: "refresh_token",
+    refresh_token: p('amazon.refreshToken'),
+    client_id: p('amazon.clientId'),
+    client_secret: p('amazon.clientSecret')
+}]]]></http:body>
+                </http:request>
+                <set-variable variableName="lwaToken" value="#[payload.access_token]" doc:name="lwaToken"/>
+                <os:store doc:name="Cache LWA Token" key="amazon_lwa_token" objectStore="Token_Store">
+                    <os:value><![CDATA[#[vars.lwaToken]]]></os:value>
+                </os:store>
+            </when>
+        </choice>
+        <set-payload value="#[vars.lwaToken]" doc:name="Return token"/>
+    </flow>
+
+    <!-- Expects vars.since. Returns [ { order: {...}, items: [...] } ] -->
+    <flow name="sys-amazon-get-orders-with-items-flow">
+        <flow-ref doc:name="Get Amazon Access Token" name="sys-amazon-get-access-token-flow" target="amazonToken"/>
+        <http:request method="GET" doc:name="Amazon Get Orders" config-ref="Amazon_SPAPI_Request_config"
+                      path="/orders/v0/orders">
+            <http:headers><![CDATA[#[{ "x-amz-access-token": vars.amazonToken }]]]></http:headers>
+            <http:query-params><![CDATA[#[{
+    MarketplaceIds: p('amazon.marketplaceId'),
+    LastUpdatedAfter: vars.since
+}]]]></http:query-params>
+        </http:request>
+        <set-variable variableName="amazonOrdersWithItems" value="#[[]]" doc:name="Init accumulator"/>
+        <foreach doc:name="For each Amazon order" collection="#[payload.payload.Orders default []]">
+            <set-variable variableName="amazonOrder" value="#[payload]" doc:name="amazonOrder"/>
+            <http:request method="GET" doc:name="Amazon Get Order Items" config-ref="Amazon_SPAPI_Request_config"
+                          path="/orders/v0/orders/{orderId}/orderItems">
+                <http:headers><![CDATA[#[{ "x-amz-access-token": vars.amazonToken }]]]></http:headers>
+                <http:uri-params><![CDATA[#[{ orderId: vars.amazonOrder.AmazonOrderId }]]]></http:uri-params>
+            </http:request>
+            <set-variable variableName="amazonOrdersWithItems" doc:name="Append order + items"
+                          value="#[vars.amazonOrdersWithItems ++ [{ order: vars.amazonOrder, items: payload.payload.OrderItems default [] }]]"/>
+        </foreach>
+        <set-payload value="#[output application/json --- vars.amazonOrdersWithItems]" doc:name="Return orders with items"/>
+    </flow>
+
+    <!-- Expects vars.sku and a Listings patch payload. -->
+    <flow name="sys-amazon-patch-listing-flow">
+        <flow-ref doc:name="Get Amazon Access Token" name="sys-amazon-get-access-token-flow" target="amazonToken"/>
+        <http:request method="PATCH" doc:name="Amazon Patch Listing" config-ref="Amazon_SPAPI_Request_config"
+                      path="/listings/2021-08-01/items/{sellerId}/{sku}">
+            <http:headers><![CDATA[#[{ "x-amz-access-token": vars.amazonToken }]]]></http:headers>
+            <http:uri-params><![CDATA[#[{ sellerId: p('amazon.sellerId'), sku: vars.sku }]]]></http:uri-params>
+            <http:query-params><![CDATA[#[{ marketplaceIds: p('amazon.marketplaceId') }]]]></http:query-params>
+        </http:request>
+    </flow>
+</mule>

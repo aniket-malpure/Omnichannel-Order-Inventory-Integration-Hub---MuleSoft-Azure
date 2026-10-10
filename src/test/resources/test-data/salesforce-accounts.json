@@ -1,0 +1,38 @@
+{
+  "totalSize": 2,
+  "done": true,
+  "records": [
+    {
+      "attributes": { "type": "Account", "url": "/services/data/v60.0/sobjects/Account/001Dn00000AbCdEIAV" },
+      "Id": "001Dn00000AbCdEIAV",
+      "Name": "  Lakeshore Fabrication LLC ",
+      "AccountNumber": "LF-10042",
+      "Type": "Customer - Direct",
+      "Industry": "Manufacturing",
+      "Phone": "(616) 555-0199",
+      "Website": "https://lakeshore-fab.example.com",
+      "BillingStreet": "4100 Lake Michigan Dr",
+      "BillingCity": "Grand Rapids",
+      "BillingState": "MI",
+      "BillingPostalCode": "49534",
+      "BillingCountry": "US",
+      "LastModifiedDate": "2026-10-09T15:20:00.000+0000"
+    },
+    {
+      "attributes": { "type": "Account", "url": "/services/data/v60.0/sobjects/Account/001Dn00000XyZ12IAF" },
+      "Id": "001Dn00000XyZ12IAF",
+      "Name": "Summit Utility Services",
+      "AccountNumber": null,
+      "Type": null,
+      "Industry": "Utilities",
+      "Phone": null,
+      "Website": null,
+      "BillingStreet": "88 Ridge Rd",
+      "BillingCity": "Denver",
+      "BillingState": "CO",
+      "BillingPostalCode": "80202",
+      "BillingCountry": null,
+      "LastModifiedDate": "2026-10-09T15:45:00.000+0000"
+    }
+  ]
+}

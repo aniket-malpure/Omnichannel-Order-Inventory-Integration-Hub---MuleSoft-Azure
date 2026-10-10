@@ -1,0 +1,31 @@
+{
+  "orderId": "SHP-5501234567001",
+  "channel": "SHOPIFY",
+  "channelOrderId": "5501234567001",
+  "channelOrderNumber": "#1001",
+  "orderDate": "2026-10-09",
+  "currency": "USD",
+  "status": "PAID",
+  "customer": {
+    "externalId": "7001",
+    "email": "jordan.lee@example.com",
+    "firstName": "Jordan",
+    "lastName": "Lee",
+    "phone": "+16165550101"
+  },
+  "shipTo": {
+    "name": "Jordan Lee",
+    "street1": "220 Ottawa Ave NW",
+    "street2": "Suite 4",
+    "city": "Grand Rapids",
+    "state": "MI",
+    "postalCode": "49503",
+    "country": "US"
+  },
+  "lines": [
+    { "lineNumber": 1, "sku": "GLV-CUT-A6-L", "description": "Cut Resistant Glove A6 - L", "quantity": 2, "unitPrice": 29.99, "discountAmount": 5.0, "taxAmount": 3.3 },
+    { "lineNumber": 2, "sku": "SLV-CUT-A5-18", "description": "Cut Sleeve A5 18in", "quantity": 1, "unitPrice": 24.99, "discountAmount": 0, "taxAmount": 1.8 }
+  ],
+  "totals": { "subtotal": 84.97, "tax": 5.1, "shipping": 9.1, "discount": 5.0, "grandTotal": 94.07 },
+  "sourceUpdatedAt": "2026-10-09T10:16:30-04:00"
+}

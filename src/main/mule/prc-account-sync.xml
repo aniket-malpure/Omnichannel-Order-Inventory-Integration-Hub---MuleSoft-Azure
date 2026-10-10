@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+      xmlns:os="http://www.mulesoft.org/schema/mule/os"
+      xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/os http://www.mulesoft.org/schema/mule/os/current/mule-os.xsd
+        http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd">
+
+    <!-- =====================================================================
+         PROCESS LAYER: Account sync (Salesforce Accounts -> canonical customer -> SAP B1 Business Partners)
+         ===================================================================== -->
+
+    <flow name="prc-account-sync-scheduler-flow">
+        <scheduler doc:name="Account sync schedule">
+            <scheduling-strategy>
+                <fixed-frequency frequency="${schedule.accountSyncMinutes}" timeUnit="MINUTES"/>
+            </scheduling-strategy>
+        </scheduler>
+        <flow-ref doc:name="Sync accounts" name="prc-account-sync-flow"/>
+    </flow>
+
+    <flow name="prc-account-sync-flow">
+        <os:retrieve doc:name="Get Accounts Watermark" key="accounts_watermark" objectStore="Watermark_Store" target="since">
+            <os:default-value><![CDATA[#[import modules::Utils --- Utils::isoTimestamp(now() - |P1D|)]]]></os:default-value>
+        </os:retrieve>
+        <set-variable variableName="runStartedAt" doc:name="runStartedAt"
+                      value="#[import modules::Utils --- Utils::isoTimestamp(now())]"/>
+
+        <flow-ref doc:name="Query Salesforce Accounts" name="sys-salesforce-query-accounts-flow"/>
+        <ee:transform doc:name="Salesforce to Canonical Customer">
+            <ee:message>
+                <ee:set-payload resource="dwl/salesforce-account-to-canonical.dwl"/>
+            </ee:message>
+        </ee:transform>
+        <set-variable variableName="accounts" value="#[payload]" doc:name="accounts"/>
+
+        <foreach doc:name="Upsert each account" collection="#[vars.accounts]">
+            <set-payload value="#[output application/json --- payload]" doc:name="Serialize JSON"/>
+            <flow-ref doc:name="Upsert account" name="prc-account-upsert-single-flow"/>
+        </foreach>
+
+        <os:store doc:name="Advance Watermark" key="accounts_watermark" objectStore="Watermark_Store">
+            <os:value><![CDATA[#[vars.runStartedAt]]]></os:value>
+        </os:store>
+        <set-payload value="#[output application/json --- { processed: sizeOf(vars.accounts), since: vars.since }]" doc:name="Summary"/>
+        <logger level="INFO" doc:name="Log summary" message="#['[' ++ correlationId ++ '] Account sync processed ' ++ (sizeOf(vars.accounts) as String) ++ ' accounts']"/>
+    </flow>
+
+    <!-- Payload: canonical customer. Optional vars.retryErrorId when replaying. -->
+    <flow name="prc-account-upsert-single-flow">
+        <set-variable variableName="channel" value="SALESFORCE" doc:name="channel"/>
+        <set-variable variableName="entityType" value="ACCOUNT" doc:name="entityType"/>
+        <set-variable variableName="entityKey" value="#[payload.customerId]" doc:name="entityKey"/>
+        <set-variable variableName="sourceRecord" value="#[payload]" doc:name="sourceRecord"/>
+        <set-variable variableName="startMillis" value="#[now() as Number { unit: 'milliseconds' }]" doc:name="startMillis"/>
+
+        <ee:transform doc:name="Canonical to SAP B1 Business Partner">
+            <ee:message>
+                <ee:set-payload resource="dwl/canonical-to-sapb1-bp.dwl"/>
+            </ee:message>
+        </ee:transform>
+        <set-variable variableName="cardCode" value="#[payload.CardCode]" doc:name="cardCode"/>
+
+        <flow-ref doc:name="Upsert Business Partner" name="sys-sapb1-upsert-bp-flow"/>
+
+        <set-variable variableName="outcome" value="SYNCED" doc:name="outcome SYNCED"/>
+        <set-variable variableName="targetRef" value="#[vars.cardCode ++ ':' ++ vars.bpAction]" doc:name="targetRef"/>
+        <flow-ref doc:name="Audit" name="common-log-sync-audit-flow"/>
+
+        <error-handler>
+            <on-error-continue type="ANY" doc:name="Log and queue for replay">
+                <flow-ref doc:name="Log sync error" name="common-log-sync-error-flow"/>
+            </on-error-continue>
+        </error-handler>
+    </flow>
+</mule>

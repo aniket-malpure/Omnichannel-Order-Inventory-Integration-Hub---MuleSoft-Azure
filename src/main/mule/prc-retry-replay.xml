@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+      xmlns:db="http://www.mulesoft.org/schema/mule/db"
+      xmlns:vm="http://www.mulesoft.org/schema/mule/vm"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/db http://www.mulesoft.org/schema/mule/db/current/mule-db.xsd
+        http://www.mulesoft.org/schema/mule/vm http://www.mulesoft.org/schema/mule/vm/current/mule-vm.xsd">
+
+    <!-- =====================================================================
+         PROCESS LAYER: Replay failed syncs from Azure SQL.
+         usp_claim_retryable_errors locks due rows (UPDLOCK/READPAST) so
+         multiple CloudHub replicas never replay the same record twice.
+         Backoff is exponential (2^retry_count minutes) and rows move to
+         DEAD_LETTER after max_retries.
+         ===================================================================== -->
+
+    <flow name="prc-retry-replay-scheduler-flow">
+        <scheduler doc:name="Replay schedule">
+            <scheduling-strategy>
+                <fixed-frequency frequency="${schedule.retryReplayMinutes}" timeUnit="MINUTES"/>
+            </scheduling-strategy>
+        </scheduler>
+        <flow-ref doc:name="Replay" name="prc-retry-replay-flow"/>
+    </flow>
+
+    <flow name="prc-retry-replay-flow">
+        <db:stored-procedure doc:name="Claim Retryable Errors" config-ref="AzureSQL_Database_config">
+            <db:sql><![CDATA[{call dbo.usp_claim_retryable_errors(:batchSize)}]]></db:sql>
+            <db:input-parameters><![CDATA[#[{ batchSize: p('retry.replayBatchSize') as Number }]]]></db:input-parameters>
+        </db:stored-procedure>
+        <set-variable variableName="claimed" value="#[payload.resultSet1 default []]" doc:name="claimed"/>
+
+        <foreach doc:name="Replay each" collection="#[vars.claimed]">
+            <set-variable variableName="row" value="#[payload]" doc:name="row"/>
+            <choice doc:name="Entity type">
+                <when expression="#[vars.row.entity_type == 'ORDER']">
+                    <set-payload doc:name="Rehydrate order"
+                                 value='#[output application/json --- (read(vars.row.payload_json, "application/json") - "_meta") ++ { "_meta": { retryErrorId: vars.row.error_id } }]'/>
+                    <vm:publish doc:name="Re-publish to order-sync-q" config-ref="VM_Config" queueName="order-sync-q"/>
+                </when>
+                <when expression="#[vars.row.entity_type == 'ACCOUNT']">
+                    <set-variable variableName="retryErrorId" value="#[vars.row.error_id]" doc:name="retryErrorId"/>
+                    <set-payload doc:name="Rehydrate account"
+                                 value='#[output application/json --- read(vars.row.payload_json, "application/json")]'/>
+                    <flow-ref doc:name="Upsert account" name="prc-account-upsert-single-flow"/>
+                    <remove-variable variableName="retryErrorId" doc:name="Clear retryErrorId"/>
+                </when>
+                <otherwise>
+                    <logger level="WARN" doc:name="Unsupported"
+                            message="#['Replay not supported for entity type ' ++ (vars.row.entity_type default 'null')]"/>
+                </otherwise>
+            </choice>
+        </foreach>
+        <set-payload value="#[output application/json --- { replayed: sizeOf(vars.claimed) }]" doc:name="Summary"/>
+        <logger level="INFO" doc:name="Log summary" message="#['[' ++ correlationId ++ '] Replayed ' ++ (sizeOf(vars.claimed) as String) ++ ' failed syncs']"/>
+    </flow>
+</mule>

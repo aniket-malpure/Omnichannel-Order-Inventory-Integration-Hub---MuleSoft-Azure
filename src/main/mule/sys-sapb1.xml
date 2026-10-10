@@ -1,0 +1,120 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns:os="http://www.mulesoft.org/schema/mule/os"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+        http://www.mulesoft.org/schema/mule/os http://www.mulesoft.org/schema/mule/os/current/mule-os.xsd">
+
+    <!-- =====================================================================
+         SYSTEM LAYER: SAP Business One Service Layer (OData v4, session cookie auth)
+         ===================================================================== -->
+
+    <!-- Returns a B1SESSION id, reusing a cached session for up to 25 minutes. -->
+    <flow name="sys-sapb1-get-session-flow">
+        <os:retrieve doc:name="Get Cached SAP B1 Session" key="sapb1_session" objectStore="SAPB1_Session_Store" target="b1Session">
+            <os:default-value><![CDATA[#[""]]]></os:default-value>
+        </os:retrieve>
+        <choice doc:name="Session cached?">
+            <when expression="#[isEmpty(vars.b1Session)]">
+                <http:request method="POST" doc:name="SAPB1 Login" config-ref="SAPB1_Request_config" path="/b1s/v1/Login">
+                    <http:body><![CDATA[#[output application/json
+---
+{
+    CompanyDB: p('sapb1.companyDb'),
+    UserName: p('sapb1.user'),
+    Password: p('sapb1.password')
+}]]]></http:body>
+                </http:request>
+                <set-variable variableName="b1Session" value="#[payload.SessionId]" doc:name="b1Session"/>
+                <os:store doc:name="Cache SAP B1 Session" key="sapb1_session" objectStore="SAPB1_Session_Store">
+                    <os:value><![CDATA[#[vars.b1Session]]]></os:value>
+                </os:store>
+            </when>
+        </choice>
+        <set-payload value="#[vars.b1Session]" doc:name="Return session"/>
+    </flow>
+
+    <!-- Idempotency check. Expects vars.order (canonical). Returns { value: [ { DocEntry, DocNum } ] } -->
+    <flow name="sys-sapb1-find-order-flow">
+        <flow-ref doc:name="Get SAP B1 Session" name="sys-sapb1-get-session-flow" target="b1Session"/>
+        <http:request method="GET" doc:name="SAPB1 Find Order" config-ref="SAPB1_Request_config" path="/b1s/v1/Orders">
+            <http:headers><![CDATA[#[{ Cookie: "B1SESSION=" ++ vars.b1Session }]]]></http:headers>
+            <http:query-params><![CDATA[#[{
+    "\$filter": "NumAtCard eq '" ++ vars.order.orderId ++ "'",
+    "\$select": "DocEntry,DocNum"
+}]]]></http:query-params>
+        </http:request>
+        <error-handler>
+            <on-error-propagate type="HTTP:UNAUTHORIZED" doc:name="Session expired">
+                <os:remove doc:name="Drop SAP B1 Session" key="sapb1_session" objectStore="SAPB1_Session_Store"/>
+            </on-error-propagate>
+        </error-handler>
+    </flow>
+
+    <!--
+        Creates a sales order. Called inside until-successful, so:
+          - 401 clears the cached session and raises a retryable error
+          - 400 is captured in vars.sapValidationError (not retried, raised by the caller)
+          - 5xx / connectivity errors propagate and are retried
+    -->
+    <flow name="sys-sapb1-create-order-flow">
+        <flow-ref doc:name="Get SAP B1 Session" name="sys-sapb1-get-session-flow" target="b1Session"/>
+        <http:request method="POST" doc:name="SAPB1 Create Order" config-ref="SAPB1_Request_config" path="/b1s/v1/Orders">
+            <http:headers><![CDATA[#[{ Cookie: "B1SESSION=" ++ vars.b1Session }]]]></http:headers>
+            <http:response-validator>
+                <http:success-status-code-validator values="200..299,400,401"/>
+            </http:response-validator>
+        </http:request>
+        <choice doc:name="Response status">
+            <when expression="#[attributes.statusCode == 401]">
+                <os:remove doc:name="Drop SAP B1 Session" key="sapb1_session" objectStore="SAPB1_Session_Store"/>
+                <raise-error doc:name="Session expired" type="SAPB1:SESSION_EXPIRED" description="SAP B1 session expired, re-authenticating"/>
+            </when>
+            <when expression="#[attributes.statusCode == 400]">
+                <set-variable variableName="sapValidationError" doc:name="sapValidationError"
+                              value="#[payload.error.message.value default write(payload, 'application/json')]"/>
+            </when>
+        </choice>
+    </flow>
+
+    <!-- Upserts a Business Partner. Expects vars.cardCode and an SAP BP payload. Sets vars.bpAction. -->
+    <flow name="sys-sapb1-upsert-bp-flow">
+        <flow-ref doc:name="Get SAP B1 Session" name="sys-sapb1-get-session-flow" target="b1Session"/>
+        <http:request method="GET" doc:name="SAPB1 Get Business Partner" config-ref="SAPB1_Request_config"
+                      path="/b1s/v1/BusinessPartners('{cardCode}')"
+                      target="bpLookupStatus" targetValue="#[attributes.statusCode]">
+            <http:headers><![CDATA[#[{ Cookie: "B1SESSION=" ++ vars.b1Session }]]]></http:headers>
+            <http:uri-params><![CDATA[#[{ cardCode: vars.cardCode }]]]></http:uri-params>
+            <http:response-validator>
+                <http:success-status-code-validator values="200..299,404"/>
+            </http:response-validator>
+        </http:request>
+        <choice doc:name="Exists in SAP B1?">
+            <when expression="#[vars.bpLookupStatus == 404]">
+                <http:request method="POST" doc:name="SAPB1 Create Business Partner" config-ref="SAPB1_Request_config"
+                              path="/b1s/v1/BusinessPartners">
+                    <http:headers><![CDATA[#[{ Cookie: "B1SESSION=" ++ vars.b1Session }]]]></http:headers>
+                </http:request>
+                <set-variable variableName="bpAction" value="CREATED" doc:name="bpAction CREATED"/>
+            </when>
+            <otherwise>
+                <http:request method="PATCH" doc:name="SAPB1 Update Business Partner" config-ref="SAPB1_Request_config"
+                              path="/b1s/v1/BusinessPartners('{cardCode}')">
+                    <http:body><![CDATA[#[output application/json --- payload - "CardCode"]]]></http:body>
+                    <http:headers><![CDATA[#[{ Cookie: "B1SESSION=" ++ vars.b1Session }]]]></http:headers>
+                    <http:uri-params><![CDATA[#[{ cardCode: vars.cardCode }]]]></http:uri-params>
+                </http:request>
+                <set-variable variableName="bpAction" value="UPDATED" doc:name="bpAction UPDATED"/>
+            </otherwise>
+        </choice>
+        <error-handler>
+            <on-error-propagate type="HTTP:UNAUTHORIZED" doc:name="Session expired">
+                <os:remove doc:name="Drop SAP B1 Session" key="sapb1_session" objectStore="SAPB1_Session_Store"/>
+            </on-error-propagate>
+        </error-handler>
+    </flow>
+</mule>

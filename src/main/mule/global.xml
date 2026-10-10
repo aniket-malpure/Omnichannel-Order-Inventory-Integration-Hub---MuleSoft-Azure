@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns:db="http://www.mulesoft.org/schema/mule/db"
+      xmlns:vm="http://www.mulesoft.org/schema/mule/vm"
+      xmlns:os="http://www.mulesoft.org/schema/mule/os"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+        http://www.mulesoft.org/schema/mule/db http://www.mulesoft.org/schema/mule/db/current/mule-db.xsd
+        http://www.mulesoft.org/schema/mule/vm http://www.mulesoft.org/schema/mule/vm/current/mule-vm.xsd
+        http://www.mulesoft.org/schema/mule/os http://www.mulesoft.org/schema/mule/os/current/mule-os.xsd">
+
+    <!-- ============ Environment ============ -->
+    <global-property doc:name="Default environment" name="env" value="local"/>
+    <configuration-properties doc:name="Environment properties" file="config/config-${env}.yaml"/>
+    <configuration doc:name="Default error handler" defaultErrorHandler-ref="global-error-handler"/>
+
+    <!-- ============ Inbound (Experience layer) ============ -->
+    <http:listener-config name="HTTP_Listener_config" doc:name="HTTP Listener config">
+        <http:listener-connection host="0.0.0.0" port="${http.port}"/>
+    </http:listener-config>
+
+    <!-- ============ Outbound (System layer) ============ -->
+    <http:request-config name="Shopify_Request_config" doc:name="Shopify Admin API"
+                         basePath="${shopify.basePath}" responseTimeout="30000">
+        <http:request-connection protocol="${shopify.protocol}" host="${shopify.host}" port="${shopify.port}"/>
+        <http:default-headers>
+            <http:default-header key="X-Shopify-Access-Token" value="${shopify.token}"/>
+        </http:default-headers>
+    </http:request-config>
+
+    <http:request-config name="Amazon_Auth_Request_config" doc:name="Amazon LWA Auth"
+                         basePath="${amazon.auth.basePath}" responseTimeout="30000">
+        <http:request-connection protocol="${amazon.auth.protocol}" host="${amazon.auth.host}" port="${amazon.auth.port}"/>
+    </http:request-config>
+
+    <http:request-config name="Amazon_SPAPI_Request_config" doc:name="Amazon Selling Partner API"
+                         basePath="${amazon.spapi.basePath}" responseTimeout="30000">
+        <http:request-connection protocol="${amazon.spapi.protocol}" host="${amazon.spapi.host}" port="${amazon.spapi.port}"/>
+    </http:request-config>
+
+    <http:request-config name="SAPB1_Request_config" doc:name="SAP Business One Service Layer"
+                         basePath="${sapb1.basePath}" responseTimeout="60000">
+        <http:request-connection protocol="${sapb1.protocol}" host="${sapb1.host}" port="${sapb1.port}"/>
+    </http:request-config>
+
+    <http:request-config name="Salesforce_Request_config" doc:name="Salesforce REST API"
+                         basePath="${salesforce.basePath}" responseTimeout="30000">
+        <http:request-connection protocol="${salesforce.protocol}" host="${salesforce.host}" port="${salesforce.port}"/>
+    </http:request-config>
+
+    <http:request-config name="WMS_Request_config" doc:name="WMS API"
+                         basePath="${wms.basePath}" responseTimeout="60000">
+        <http:request-connection protocol="${wms.protocol}" host="${wms.host}" port="${wms.port}"/>
+        <http:default-headers>
+            <http:default-header key="x-api-key" value="${wms.apiKey}"/>
+        </http:default-headers>
+    </http:request-config>
+
+    <!-- ============ Azure SQL (audit + error log + replay queue) ============ -->
+    <db:config name="AzureSQL_Database_config" doc:name="Azure SQL Database">
+        <db:generic-connection url="${azuresql.url}"
+                               driverClassName="com.microsoft.sqlserver.jdbc.SQLServerDriver"
+                               user="${azuresql.user}"
+                               password="${azuresql.password}">
+            <db:pooling-profile maxPoolSize="10" minPoolSize="1" acquireIncrement="1"/>
+        </db:generic-connection>
+    </db:config>
+
+    <!-- ============ Async decoupling ============ -->
+    <vm:config name="VM_Config" doc:name="VM Config">
+        <vm:queues>
+            <vm:queue queueName="order-sync-q" queueType="PERSISTENT"/>
+        </vm:queues>
+    </vm:config>
+
+    <!-- ============ State ============ -->
+    <os:object-store name="Watermark_Store" doc:name="Polling watermarks" persistent="true"/>
+    <os:object-store name="Token_Store" doc:name="OAuth tokens" persistent="false"
+                     entryTtl="50" entryTtlUnit="MINUTES"/>
+    <os:object-store name="SAPB1_Session_Store" doc:name="SAP B1 sessions" persistent="false"
+                     entryTtl="25" entryTtlUnit="MINUTES"/>
+</mule>

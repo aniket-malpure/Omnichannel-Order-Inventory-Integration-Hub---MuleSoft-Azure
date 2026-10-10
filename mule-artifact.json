@@ -1,0 +1,15 @@
+{
+  "minMuleVersion": "4.6.0",
+  "javaSpecificationVersions": ["17"],
+  "secureProperties": [
+    "shopify.token",
+    "shopify.webhookSecret",
+    "amazon.clientSecret",
+    "amazon.refreshToken",
+    "sapb1.password",
+    "salesforce.clientSecret",
+    "wms.apiKey",
+    "azuresql.password",
+    "api.key"
+  ]
+}
